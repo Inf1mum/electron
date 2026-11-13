@@ -9,7 +9,7 @@ Specifically, we'll be using GTK3 for our GUI interface, which provides:
 * Integration with the native theming and accessibility features of Linux desktops
 
 > [!NOTE]
-> We specifically use GTK3 because that's what Chromium (and by extension, Electron) uses internally. Using GTK4 would cause runtime conflicts since both GTK3 and GTK4 would be loaded in the same process. If and when Chromium upgrades to GTK4, you will likely be able to easily upgrade your native code to GTK4, too.
+> Chromium (and by extension, Electron) supports both GTK3 and GTK4 and loads one of them at startup. Since GTK3 and GTK4 cannot be loaded into the same process, your native code has to be built against the same major version that Electron loads. This tutorial uses GTK3. See [GTK4 and Wayland](#gtk4-and-wayland) for how Electron picks a GTK version, how to make sure it picks the one your addon is built against, and what to change if you want to use GTK4 instead.
 
 This tutorial will be most useful to those who already have some familiarity with GTK development on Linux. You should have experience with basic GTK concepts like widgets, signals, and the main event loop. In the interest of brevity, we're not spending too much time explaining the individual GTK elements we're using or the code we're writing for them. This allows this tutorial to be really helpful for those who already know GTK development and want to use their skills with Electron - without having to also be an entire GTK documentation.
 
@@ -35,6 +35,8 @@ On Fedora/RHEL/CentOS:
 ```sh
 sudo dnf install gcc-c++ pkgconfig gtk3-devel
 ```
+
+If you want to build your addon against GTK4 instead of GTK3, install `libgtk-4-dev` (Ubuntu/Debian) or `gtk4-devel` (Fedora/RHEL/CentOS) instead. See [GTK4 and Wayland](#gtk4-and-wayland) below for details.
 
 ## 1) Creating a package
 
@@ -1649,6 +1651,64 @@ When you run this code:
 
 All interactions with the native GTK3 interface will trigger the corresponding JavaScript events, allowing your Electron application to respond to native GUI actions in real-time.
 
+## GTK4 and Wayland
+
+As noted at the beginning of this tutorial, Electron (through Chromium) loads either GTK3 or GTK4 at startup - and a process can only ever contain one of the two. If both end up in the same process, Electron will fail to start or your addon will crash, depending on which of the two libraries gets initialized first. You may see an error like the following:
+
+```txt
+Gtk-ERROR **: 11:30:38.382: GTK 2/3 symbols detected. Using GTK 2/3 and GTK 4 in the same process is not supported
+```
+
+This means that the GTK major version your addon is built against has to match the one Electron loads. Since this tutorial builds a GTK3 addon, the safest approach is to pin Electron to GTK3.
+
+### Making sure Electron uses the same GTK version as your addon
+
+Electron picks its GTK version as follows:
+
+* If the `gtk-version` command-line switch is set (for example `--gtk-version=3` or `--gtk-version=4`), Electron loads that version.
+* Without the switch, Electron 36 and later load GTK4 by default in GNOME sessions. As of current versions, that only applies when Electron runs as a native Wayland app - in GNOME X11 sessions and on all other desktops, Electron loads GTK3.
+* If the preferred version is not installed on the system, Electron falls back to the other one.
+
+These defaults have changed before and will likely change again, so we recommend not relying on them: set the `gtk-version` switch explicitly to the version your addon is built against. To pin the version for the addon built in this tutorial, add the following at the top of your app's main script (the switch has to be set before Electron loads GTK, which happens before the `ready` event is emitted):
+
+```js
+// main.js (right beneath your require/import statements)
+const { app } = require('electron')
+
+// The addon from this tutorial is built against GTK3, so make sure
+// Electron loads GTK3 as well.
+app.commandLine.appendSwitch('gtk-version', '3')
+```
+
+Alternatively, pass the switch on the command line when launching your app (for example `electron . --gtk-version=3`). For more background, see the entry on [GTK4 becoming the default in GNOME sessions](../breaking-changes.md#changed-gtk-4-is-default-when-running-gnome) in our breaking changes document.
+
+### Using GTK4 instead
+
+If you'd rather write your native interface with GTK4, you need:
+
+* The GTK4 development files installed (`libgtk-4-dev` on Ubuntu/Debian, `gtk4-devel` on Fedora/RHEL/CentOS)
+* Every occurrence of `gtk+-3.0` in the `binding.gyp` file from step 2 replaced with `gtk4`, so that `pkg-config` finds the GTK4 libraries and header paths
+* Electron to load GTK4, which is the default in GNOME Wayland sessions and can be forced everywhere else with `--gtk-version=4`
+
+GTK4 is not source-compatible with GTK3, so the code in this tutorial needs a few changes. The most relevant ones are:
+
+* `gtk_init_check()` no longer accepts command-line arguments. Call it without arguments.
+* `GtkContainer` was removed. Instead of `gtk_container_add()` and `gtk_container_remove()`, use the matching function of the widget you are adding to or removing from (like `gtk_box_append()` or `gtk_list_box_append()`), and use `gtk_window_set_child()` for windows.
+* `gtk_container_get_children()` was removed. To walk a widget's children, use `gtk_widget_get_first_child()` and `gtk_widget_get_next_sibling()`.
+* Widgets are visible by default, so `gtk_widget_show_all()` was removed and the `visible` properties in the GtkBuilder XML are no longer needed. Show toplevel windows with `gtk_window_present()` instead.
+* `gtk_dialog_run()` was removed. Keep the dialog modal and connect to its `response` signal instead. Note that `GtkDialog` itself has been deprecated since GTK 4.10.
+* `gtk_entry_get_text()` and `gtk_entry_set_text()` were removed. Use `gtk_editable_get_text()` and `gtk_editable_set_text()` instead.
+* `gtk_widget_destroy()` was removed. Use `gtk_window_destroy()` for windows and dialogs.
+* The `GtkCalendar` API works with `GDateTime`: `gtk_calendar_get_date()` returns one, and `gtk_calendar_select_day()` takes one.
+* `gtk_popover_new_from_model()` was removed. Use `gtk_popover_menu_new_from_model()` instead and attach the popover to its parent widget with `gtk_widget_set_parent()`.
+* The combined `margin` property in the GtkBuilder XML was removed. Use the individual `margin-start`, `margin-end`, `margin-top`, and `margin-bottom` properties instead.
+
+The [official GTK3 to GTK4 migration guide](https://docs.gtk.org/gtk4/migrating-3to4.html) describes these (and many more) changes in detail, and the [GTK4 documentation](https://docs.gtk.org/gtk4/) is the best starting point for writing new GTK4 code.
+
+### A note on Wayland
+
+Since Electron 38, Electron runs as a native Wayland app by default when launched in a Wayland session (see the [`--ozone-platform`](../api/command-line-switches.md#--ozone-platformplatform-linux) documentation for details, including how to force XWayland with `--ozone-platform=x11`). Your addon runs inside Electron's process, and in a working setup both use the same GTK library. That means your addon's windows go through the same display backend (X11 or Wayland) as the rest of the app - there is no separate GTK configuration for Wayland.
+
 ## Conclusion
 
 You've now built a complete native Node.js addon for Linux using C++ and GTK3. This addon:
@@ -1656,7 +1716,7 @@ You've now built a complete native Node.js addon for Linux using C++ and GTK3. T
 1. Provides a bidirectional bridge between JavaScript and C++
 1. Creates a native GTK3 GUI that runs in its own thread
 1. Implements a simple Todo application with add functionality
-1. Uses GTK3, which is compatible with Electron's Chromium runtime
+1. Uses GTK3, which works alongside Electron as long as Electron loads GTK3 as well (see [GTK4 and Wayland](#gtk4-and-wayland))
 1. Handles callbacks from C++ to JavaScript safely
 
 This foundation can be extended to implement more complex Linux-specific features in your Electron applications. You can access system features, integrate with Linux-specific libraries, or create performant native UIs while maintaining the flexibility and ease of development that Electron provides.
